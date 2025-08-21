@@ -18,7 +18,9 @@ class CSVTemperatureAnalyzer:
         # Data storage
         self.csv_files = []
         self.current_df = None
+        self.comparison_df = None
         self.detected_columns = {}
+        self.comparison_detected_columns = {}
         
         # Initialize settings variables with defaults
         self.ma_window_var = tk.IntVar(value=5)
@@ -38,7 +40,7 @@ class CSVTemperatureAnalyzer:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
-        main_frame.rowconfigure(3, weight=1)
+        main_frame.rowconfigure(5, weight=1)  # Plot area row
         
         # File selection section
         ttk.Label(main_frame, text="Select CSV File:", font=('Arial', 12, 'bold')).grid(row=0, column=0, sticky=tk.W, pady=(0,5))
@@ -48,9 +50,35 @@ class CSVTemperatureAnalyzer:
         self.csv_dropdown.grid(row=0, column=1, columnspan=2, sticky=(tk.W, tk.E), pady=(0,5))
         self.csv_dropdown.bind('<<ComboboxSelected>>', self.on_csv_selected)
         
+        # Comparison file selection
+        ttk.Label(main_frame, text="Compare with:", font=('Arial', 10)).grid(row=1, column=0, sticky=tk.W, pady=(5,5))
+        
+        self.comparison_var = tk.StringVar()
+        self.comparison_dropdown = ttk.Combobox(main_frame, textvariable=self.comparison_var, width=50, state="readonly")
+        self.comparison_dropdown.grid(row=1, column=1, columnspan=2, sticky=(tk.W, tk.E), pady=(5,5))
+        self.comparison_dropdown.bind('<<ComboboxSelected>>', self.on_comparison_selected)
+        
+        # Time shift control
+        shift_frame = ttk.Frame(main_frame)
+        shift_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(5,10))
+        
+        ttk.Label(shift_frame, text="Time shift comparison:").pack(side=tk.LEFT, padx=(0,10))
+        
+        self.time_shift_var = tk.DoubleVar(value=0.0)
+        self.time_shift_scale = ttk.Scale(shift_frame, from_=-120, to=120, 
+                                         variable=self.time_shift_var, 
+                                         orient=tk.HORIZONTAL, length=200,
+                                         command=self.on_time_shift_changed)
+        self.time_shift_scale.pack(side=tk.LEFT, padx=(0,10))
+        
+        self.shift_label = ttk.Label(shift_frame, text="0.0 min")
+        self.shift_label.pack(side=tk.LEFT, padx=(5,0))
+        
+        ttk.Button(shift_frame, text="Reset", command=self.reset_time_shift).pack(side=tk.LEFT, padx=(10,0))
+        
         # Buttons frame
         buttons_frame = ttk.Frame(main_frame)
-        buttons_frame.grid(row=1, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
+        buttons_frame.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=10)
         
         ttk.Button(buttons_frame, text="Browse Files", command=self.browse_files).pack(side=tk.LEFT, padx=(0,10))
         ttk.Button(buttons_frame, text="Refresh", command=self.scan_for_csv_files).pack(side=tk.LEFT, padx=(0,10))
@@ -59,7 +87,7 @@ class CSVTemperatureAnalyzer:
         
         # Column detection info
         self.info_frame = ttk.LabelFrame(main_frame, text="Detected Columns", padding="5")
-        self.info_frame.grid(row=2, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0,10))
+        self.info_frame.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(0,10))
         
         self.info_text = tk.Text(self.info_frame, height=4, wrap=tk.WORD)
         info_scrollbar = ttk.Scrollbar(self.info_frame, orient="vertical", command=self.info_text.yview)
@@ -70,12 +98,12 @@ class CSVTemperatureAnalyzer:
         
         # Plot area with notebook (tabs)
         self.notebook = ttk.Notebook(main_frame)
-        self.notebook.grid(row=3, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.notebook.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # Status bar
         self.status_var = tk.StringVar(value="Ready - Select a CSV file to begin")
         status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10,0))
+        status_bar.grid(row=6, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=(10,0))
         
     def scan_for_csv_files(self):
         """Scan current directory and common subdirectories for CSV files"""
@@ -92,9 +120,10 @@ class CSVTemperatureAnalyzer:
             if data_path.exists():
                 csv_files.extend(list(data_path.glob("*.csv")))
         
-        # Update dropdown
+        # Update both dropdowns
         self.csv_files = [str(f) for f in csv_files]
         self.csv_dropdown['values'] = self.csv_files
+        self.comparison_dropdown['values'] = ["(None)"] + self.csv_files
         
         if self.csv_files:
             self.status_var.set(f"Found {len(self.csv_files)} CSV files")
@@ -114,9 +143,70 @@ class CSVTemperatureAnalyzer:
                 if filename not in self.csv_files:
                     self.csv_files.append(filename)
             
-            # Update dropdown
+            # Update both dropdowns
             self.csv_dropdown['values'] = self.csv_files
+            self.comparison_dropdown['values'] = ["(None)"] + self.csv_files
             self.status_var.set(f"Added {len(filenames)} files. Total: {len(self.csv_files)} CSV files available")
+            
+    def on_comparison_selected(self, event=None):
+        """Handle comparison CSV file selection"""
+        selected_file = self.comparison_var.get()
+        if not selected_file or selected_file == "(None)":
+            self.comparison_df = None
+            self.comparison_detected_columns = {}
+            self.update_column_info()  # Refresh display
+            self.status_var.set("Comparison file cleared")
+            return
+            
+        try:
+            self.status_var.set("Loading comparison CSV file...")
+            self.root.update()
+            
+            # Load and process the comparison CSV
+            df = self.load_and_process_csv(selected_file)
+            
+            # Detect column types
+            self.comparison_detected_columns = self.detect_column_types(df)
+            
+            # Process time column
+            df, time_col = self.process_time_column(df, self.comparison_detected_columns['time'])
+            
+            self.comparison_df = df
+            
+            # Update info display to show both datasets
+            self.update_column_info()
+            
+            self.status_var.set(f"Loaded comparison: {len(df)} rows from {os.path.basename(selected_file)}")
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load comparison CSV file:\n{str(e)}")
+            self.status_var.set("Error loading comparison file")
+            
+    def on_time_shift_changed(self, value):
+        """Handle time shift slider changes"""
+        shift_minutes = float(value)
+        self.shift_label.config(text=f"{shift_minutes:.1f} min")
+        
+        # Update the column info to show current shift
+        if self.comparison_df is not None:
+            self.update_column_info()
+        
+        # Auto-refresh plots when time shift changes if both datasets are loaded
+        if self.current_df is not None and self.comparison_df is not None:
+            # Add a small delay to avoid too many refreshes while dragging
+            if hasattr(self, '_shift_timer'):
+                self.root.after_cancel(self._shift_timer)
+            self._shift_timer = self.root.after(200, self.analyze_data)  # 200ms delay
+            
+    def reset_time_shift(self):
+        """Reset time shift to zero"""
+        self.time_shift_var.set(0.0)
+        self.shift_label.config(text="0.0 min")
+        if self.comparison_df is not None:
+            self.update_column_info()
+            # Auto-refresh plot when reset
+            if self.current_df is not None:
+                self.analyze_data()
             
     def detect_column_types(self, df):
         """Simple column detection - if it's time, mark it. If it's numeric with good data, plot it."""
@@ -259,8 +349,8 @@ class CSVTemperatureAnalyzer:
         time_col = time_cols[0]  # Use first detected time column
         
         try:
-            # Try different time formats
-            time_formats = ['%H:%M', '%H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d %H:%M:%S']
+            # Only try simple time formats to avoid invalid dates
+            time_formats = ['%H:%M', '%H:%M:%S']
             
             for fmt in time_formats:
                 try:
@@ -270,17 +360,10 @@ class CSVTemperatureAnalyzer:
                 except:
                     continue
                     
-            # If none of the formats work, try pandas automatic parsing
-            df['datetime'] = pd.to_datetime(df[time_col], errors='coerce')
-            valid_times = df['datetime'].notna().sum()
-            
-            if valid_times > len(df) * 0.5:  # At least 50% valid times
-                df = df.sort_values('datetime').reset_index(drop=True)
-                return df, 'datetime'
-            else:
-                # Fall back to index
-                df['index'] = range(len(df))
-                return df, 'index'
+            # If time parsing fails, fall back to index
+            print("Time parsing failed, using simple index")
+            df['index'] = range(len(df))
+            return df, 'index'
                 
         except Exception:
             # Fall back to simple index
@@ -325,13 +408,26 @@ class CSVTemperatureAnalyzer:
             self.info_text.insert(tk.END, "No file selected")
             return
             
-        info_text = ""
+        info_text = "MAIN DATASET:\n"
         for col_type, cols in self.detected_columns.items():
             if cols:
                 info_text += f"{col_type.title()}: {', '.join(cols)}\n"
                 
         if self.current_df is not None:
-            info_text += f"\nData shape: {self.current_df.shape[0]} rows × {self.current_df.shape[1]} columns"
+            info_text += f"Data shape: {self.current_df.shape[0]} rows × {self.current_df.shape[1]} columns\n"
+            
+        # Add comparison info if loaded
+        if self.comparison_df is not None and self.comparison_detected_columns:
+            info_text += "\nCOMPARISON DATASET:\n"
+            for col_type, cols in self.comparison_detected_columns.items():
+                if cols:
+                    info_text += f"{col_type.title()}: {', '.join(cols)}\n"
+            info_text += f"Data shape: {self.comparison_df.shape[0]} rows × {self.comparison_df.shape[1]} columns\n"
+            
+            # Show time shift info
+            shift_value = self.time_shift_var.get()
+            if shift_value != 0:
+                info_text += f"Time shift: {shift_value:.1f} minutes\n"
             
         self.info_text.insert(tk.END, info_text)
         
@@ -342,7 +438,7 @@ class CSVTemperatureAnalyzer:
         return series.rolling(window=window, center=True, min_periods=1).mean()
         
     def create_data_plot(self):
-        """Create data analysis plot - plots all numeric columns"""
+        """Create data analysis plot - plots all numeric columns including comparison"""
         if self.current_df is None or not self.detected_columns['data']:
             return None
             
@@ -362,7 +458,7 @@ class CSVTemperatureAnalyzer:
             x_label = 'Index'
             use_time = False
             
-        # Plot each data column with standardized styling
+        # Plot main dataset
         for col in self.detected_columns['data']:
             if col in self.current_df.columns:
                 # Convert to numeric
@@ -385,24 +481,220 @@ class CSVTemperatureAnalyzer:
                                linewidth=style['linewidth'],
                                label=f"{style['label']} (Trend)")
         
-        # Improve time axis formatting
+        # Plot comparison dataset if loaded
+        if self.comparison_df is not None and self.comparison_detected_columns.get('data'):
+            self.plot_comparison_data(ax, use_time)
+        
+        # Safe time axis formatting - only if we actually have time data
         if use_time and 'datetime' in self.current_df.columns:
-            import matplotlib.dates as mdates
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-            ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            try:
+                import matplotlib.dates as mdates
+                # Use only hourly locators to avoid tick overflow
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+                ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            except:
+                # If any time formatting fails, just skip it
+                pass
         
         ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
         ax.set_ylabel('Temperature (°F)', fontsize=12, fontweight='bold')
-        ax.set_title('Temperature Analysis', fontsize=14, fontweight='bold')
+        
+        # Update title to show comparison status
+        title = 'Temperature Analysis'
+        if self.comparison_df is not None:
+            shift = self.time_shift_var.get()
+            if shift != 0:
+                title += f' (Comparison shifted {shift:+.1f} min)'
+            else:
+                title += ' (with Comparison)'
+        
+        ax.set_title(title, fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3)
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
+        
+        # Add simple hover functionality
+        self.add_hover_functionality(fig, ax, x_data, use_time)
         
         plt.tight_layout()
         return fig
     
+    def plot_comparison_data(self, ax, use_time):
+        """Plot the comparison dataset on the same axes"""
+        # Get time shift in minutes
+        time_shift_minutes = self.time_shift_var.get()
+        
+        # Determine x-axis for comparison data
+        if 'datetime' in self.comparison_df.columns:
+            # Apply time shift
+            x_data_comp = self.comparison_df['datetime'] + pd.Timedelta(minutes=time_shift_minutes)
+        elif 'index' in self.comparison_df.columns:
+            # For index-based data, convert shift to data points (assume 5-min intervals)
+            shift_points = int(time_shift_minutes / 5) if time_shift_minutes != 0 else 0
+            x_data_comp = self.comparison_df['index'] + shift_points
+        else:
+            x_data_comp = range(len(self.comparison_df))
+            
+        # Plot comparison dataset with modified styling - ALL AT 50% OPACITY
+        for col in self.comparison_detected_columns['data']:
+            if col in self.comparison_df.columns:
+                # Convert to numeric
+                data = pd.to_numeric(self.comparison_df[col], errors='coerce')
+                if data.notna().sum() > 0:
+                    style = self.get_sensor_style(col)
+                    
+                    # Modify style for comparison (50% transparent, dashed)
+                    comp_style = style.copy()
+                    comp_style['linestyle'] = '--' if style['linestyle'] == '-' else ':'
+                    
+                    # Raw data points (if enabled) - 50% opacity
+                    if self.show_raw_var.get():
+                        ax.scatter(x_data_comp, data, 
+                                 marker='o', s=15, color=style['color'], alpha=0.5,
+                                 label=f"{style['label']} Comp (Raw)")
+                    
+                    # Smoothed trend (if enabled) - 50% opacity
+                    if self.show_trend_var.get():
+                        smoothed = self.calculate_moving_average(data)
+                        ax.plot(x_data_comp, smoothed, 
+                               color=style['color'], 
+                               linestyle=comp_style['linestyle'],
+                               linewidth=style['linewidth'],
+                               alpha=0.5,
+                               label=f"{style['label']} Comp (Trend)")
+    
+    def add_hover_functionality(self, fig, ax, x_data, use_time):
+        """Add simple mouseover functionality with line highlighting"""
+        # Create annotation box (initially invisible)
+        annot = ax.annotate('', xy=(0,0), xytext=(20,20), textcoords="offset points",
+                           bbox=dict(boxstyle="round", fc="w", alpha=0.9),
+                           arrowprops=dict(arrowstyle="->"))
+        annot.set_visible(False)
+        
+        # Store original line properties for highlighting
+        self.original_line_props = {}
+        for line in ax.get_lines():
+            self.original_line_props[line] = {
+                'linewidth': line.get_linewidth(),
+                'alpha': line.get_alpha() or 1.0
+            }
+        
+        self.highlighted_line = None
+        
+        def on_hover(event):
+            if event.inaxes == ax:
+                # Reset any previously highlighted line
+                if self.highlighted_line:
+                    props = self.original_line_props[self.highlighted_line]
+                    self.highlighted_line.set_linewidth(props['linewidth'])
+                    self.highlighted_line.set_alpha(props['alpha'])
+                    self.highlighted_line = None
+                
+                # Check if we're hovering over any data points
+                for line in ax.get_lines():
+                    contains, info = line.contains(event)
+                    if contains:
+                        # Highlight the current line
+                        line.set_linewidth(self.original_line_props[line]['linewidth'] + 2)
+                        line.set_alpha(1.0)
+                        self.highlighted_line = line
+                        
+                        # Get the data point index
+                        ind = info['ind'][0]
+                        
+                        # Get x and y coordinates
+                        xdata = line.get_xdata()
+                        ydata = line.get_ydata()
+                        
+                        if ind < len(xdata) and ind < len(ydata):
+                            x_val = xdata[ind]
+                            y_val = ydata[ind]
+                            
+                            # Get the actual time value from the dataset
+                            time_display = self.get_time_value_at_index(ind, use_time)
+                            
+                            # Format the display text
+                            text = f"{line.get_label()}\n{time_display}\nValue: {y_val:.1f}°F"
+                            
+                            # Special V3 comparison for temperature data
+                            if 'v3' in line.get_label().lower():
+                                v3_comparison = self.get_v3_temperature_comparison(ind, y_val)
+                                if v3_comparison:
+                                    text += v3_comparison
+                            
+                            # Update annotation
+                            annot.xy = (x_val, y_val)
+                            annot.set_text(text)
+                            annot.set_visible(True)
+                            fig.canvas.draw_idle()
+                            return
+                
+                # If not hovering over any line, hide annotation
+                if annot.get_visible():
+                    annot.set_visible(False)
+                    fig.canvas.draw_idle()
+        
+        # Connect the hover event
+        fig.canvas.mpl_connect('motion_notify_event', on_hover)
+    
+    def get_time_value_at_index(self, index, use_time):
+        """Get the actual time value from the dataset at the given index"""
+        if not hasattr(self, 'current_df') or index >= len(self.current_df):
+            return f"Point: {index}"
+            
+        # Try to get time from datetime column first
+        if use_time and 'datetime' in self.current_df.columns:
+            try:
+                time_val = self.current_df.iloc[index]['datetime']
+                if pd.notna(time_val):
+                    return f"Time: {time_val.strftime('%H:%M:%S')}"
+            except:
+                pass
+        
+        # Try to get time from original time column
+        time_cols = [col for col in self.current_df.columns if 'time' in col.lower()]
+        if time_cols:
+            try:
+                time_val = self.current_df.iloc[index][time_cols[0]]
+                if pd.notna(time_val):
+                    return f"Time: {time_val}"
+            except:
+                pass
+                
+        # Fallback to point number
+        return f"Point: {index}"
+    
+    def get_v3_temperature_comparison(self, index, v3_value):
+        """Get V3 comparison with TSI and Kestrel for temperature"""
+        if not hasattr(self, 'current_df') or index >= len(self.current_df):
+            return ""
+            
+        comparison_text = ""
+        
+        # Look for TSI ambient temperature
+        tsi_cols = [col for col in self.current_df.columns if 'tsi' in col.lower() and 'amb' in col.lower()]
+        if tsi_cols:
+            tsi_col = tsi_cols[0]
+            tsi_val = pd.to_numeric(self.current_df.iloc[index][tsi_col], errors='coerce')
+            if pd.notna(tsi_val):
+                diff_degrees = v3_value - tsi_val
+                diff_percent = (diff_degrees / tsi_val) * 100 if tsi_val != 0 else 0
+                comparison_text += f"\nvs TSI: {diff_degrees:+.1f}°F ({diff_percent:+.1f}%)"
+        
+        # Look for Kestrel ambient temperature  
+        kestrel_cols = [col for col in self.current_df.columns if 'kestrel' in col.lower() and 'amb' in col.lower()]
+        if kestrel_cols:
+            kestrel_col = kestrel_cols[0]
+            kestrel_val = pd.to_numeric(self.current_df.iloc[index][kestrel_col], errors='coerce')
+            if pd.notna(kestrel_val):
+                diff_degrees = v3_value - kestrel_val
+                diff_percent = (diff_degrees / kestrel_val) * 100 if kestrel_val != 0 else 0
+                comparison_text += f"\nvs Kestrel: {diff_degrees:+.1f}°F ({diff_percent:+.1f}%)"
+                
+        return comparison_text
+    
     def create_humidity_plot(self):
-        """Create humidity analysis plot"""
+        """Create humidity analysis plot including comparison"""
         if self.current_df is None or not self.detected_columns['humidity']:
             return None
             
@@ -422,7 +714,7 @@ class CSVTemperatureAnalyzer:
             x_label = 'Index'
             use_time = False
             
-        # Plot each humidity column with standardized styling
+        # Plot main dataset humidity
         for col in self.detected_columns['humidity']:
             if col in self.current_df.columns:
                 # Convert to numeric
@@ -445,21 +737,188 @@ class CSVTemperatureAnalyzer:
                                linewidth=style['linewidth'],
                                label=f"{style['label']} (Trend)")
         
-        # Improve time axis formatting
+        # Plot comparison humidity data if loaded
+        if self.comparison_df is not None and self.comparison_detected_columns.get('humidity'):
+            self.plot_comparison_humidity(ax, use_time)
+        
+        # Safe time axis formatting
         if use_time and 'datetime' in self.current_df.columns:
-            import matplotlib.dates as mdates
-            ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
-            ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
-            plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            try:
+                import matplotlib.dates as mdates
+                ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M'))
+                ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+                plt.setp(ax.xaxis.get_majorticklabels(), rotation=45, ha='right')
+            except:
+                pass
         
         ax.set_xlabel(x_label, fontsize=12, fontweight='bold')
         ax.set_ylabel('Relative Humidity (%)', fontsize=12, fontweight='bold')
-        ax.set_title('Relative Humidity Analysis', fontsize=14, fontweight='bold')
+        
+        # Update title to show comparison status
+        title = 'Relative Humidity Analysis'
+        if self.comparison_df is not None:
+            shift = self.time_shift_var.get()
+            if shift != 0:
+                title += f' (Comparison shifted {shift:+.1f} min)'
+            else:
+                title += ' (with Comparison)'
+        
+        ax.set_title(title, fontsize=14, fontweight='bold')
         ax.grid(True, alpha=0.3)
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=10)
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=9)
+        
+        # Add hover functionality for humidity
+        self.add_hover_functionality_humidity(fig, ax, x_data, use_time)
         
         plt.tight_layout()
         return fig
+    
+    def plot_comparison_humidity(self, ax, use_time):
+        """Plot the comparison humidity dataset on the same axes"""
+        # Get time shift in minutes
+        time_shift_minutes = self.time_shift_var.get()
+        
+        # Determine x-axis for comparison data
+        if 'datetime' in self.comparison_df.columns:
+            # Apply time shift
+            x_data_comp = self.comparison_df['datetime'] + pd.Timedelta(minutes=time_shift_minutes)
+        elif 'index' in self.comparison_df.columns:
+            # For index-based data, convert shift to data points (assume 5-min intervals)
+            shift_points = int(time_shift_minutes / 5) if time_shift_minutes != 0 else 0
+            x_data_comp = self.comparison_df['index'] + shift_points
+        else:
+            x_data_comp = range(len(self.comparison_df))
+            
+        # Plot comparison humidity with modified styling - ALL AT 50% OPACITY
+        for col in self.comparison_detected_columns['humidity']:
+            if col in self.comparison_df.columns:
+                # Convert to numeric
+                data = pd.to_numeric(self.comparison_df[col], errors='coerce')
+                if data.notna().sum() > 0:
+                    style = self.get_sensor_style(col)
+                    
+                    # Modify style for comparison (50% transparent, dashed)
+                    comp_style = style.copy()
+                    comp_style['linestyle'] = '--' if style['linestyle'] == '-' else ':'
+                    
+                    # Raw data points (if enabled) - 50% opacity
+                    if self.show_raw_var.get():
+                        ax.scatter(x_data_comp, data, 
+                                 marker='o', s=15, color=style['color'], alpha=0.5,
+                                 label=f"{style['label']} Comp (Raw)")
+                    
+                    # Smoothed trend (if enabled) - 50% opacity
+                    if self.show_trend_var.get():
+                        smoothed = self.calculate_moving_average(data)
+                        ax.plot(x_data_comp, smoothed, 
+                               color=style['color'], 
+                               linestyle=comp_style['linestyle'],
+                               linewidth=style['linewidth'],
+                               alpha=0.5,
+                               label=f"{style['label']} Comp (Trend)")
+    
+    def add_hover_functionality_humidity(self, fig, ax, x_data, use_time):
+        """Add mouseover functionality to humidity plot with line highlighting"""
+        # Create annotation box (initially invisible)
+        annot = ax.annotate('', xy=(0,0), xytext=(20,20), textcoords="offset points",
+                           bbox=dict(boxstyle="round", fc="w", alpha=0.9),
+                           arrowprops=dict(arrowstyle="->"))
+        annot.set_visible(False)
+        
+        # Store original line properties for highlighting
+        self.original_line_props_humidity = {}
+        for line in ax.get_lines():
+            self.original_line_props_humidity[line] = {
+                'linewidth': line.get_linewidth(),
+                'alpha': line.get_alpha() or 1.0
+            }
+        
+        self.highlighted_line_humidity = None
+        
+        def on_hover(event):
+            if event.inaxes == ax:
+                # Reset any previously highlighted line
+                if self.highlighted_line_humidity:
+                    props = self.original_line_props_humidity[self.highlighted_line_humidity]
+                    self.highlighted_line_humidity.set_linewidth(props['linewidth'])
+                    self.highlighted_line_humidity.set_alpha(props['alpha'])
+                    self.highlighted_line_humidity = None
+                
+                # Check if we're hovering over any data points
+                for line in ax.get_lines():
+                    contains, info = line.contains(event)
+                    if contains:
+                        # Highlight the current line
+                        line.set_linewidth(self.original_line_props_humidity[line]['linewidth'] + 2)
+                        line.set_alpha(1.0)
+                        self.highlighted_line_humidity = line
+                        
+                        # Get the data point index
+                        ind = info['ind'][0]
+                        
+                        # Get x and y coordinates
+                        xdata = line.get_xdata()
+                        ydata = line.get_ydata()
+                        
+                        if ind < len(xdata) and ind < len(ydata):
+                            x_val = xdata[ind]
+                            y_val = ydata[ind]
+                            
+                            # Get the actual time value from the dataset
+                            time_display = self.get_time_value_at_index(ind, use_time)
+                            
+                            # Format the display text
+                            text = f"{line.get_label()}\n{time_display}\nHumidity: {y_val:.1f}%"
+                            
+                            # Special V3 comparison for humidity data
+                            if 'v3' in line.get_label().lower():
+                                v3_comparison = self.get_v3_humidity_comparison(ind, y_val)
+                                if v3_comparison:
+                                    text += v3_comparison
+                            
+                            # Update annotation
+                            annot.xy = (x_val, y_val)
+                            annot.set_text(text)
+                            annot.set_visible(True)
+                            fig.canvas.draw_idle()
+                            return
+                
+                # If not hovering over any line, hide annotation
+                if annot.get_visible():
+                    annot.set_visible(False)
+                    fig.canvas.draw_idle()
+        
+        # Connect the hover event
+        fig.canvas.mpl_connect('motion_notify_event', on_hover)
+    
+    def get_v3_humidity_comparison(self, index, v3_value):
+        """Get V3 comparison with TSI and Kestrel for humidity"""
+        if not hasattr(self, 'current_df') or index >= len(self.current_df):
+            return ""
+            
+        comparison_text = ""
+        
+        # Look for TSI humidity
+        tsi_cols = [col for col in self.current_df.columns if 'tsi' in col.lower() and ('rh' in col.lower() or 'humidity' in col.lower())]
+        if tsi_cols:
+            tsi_col = tsi_cols[0]
+            tsi_val = pd.to_numeric(self.current_df.iloc[index][tsi_col], errors='coerce')
+            if pd.notna(tsi_val):
+                diff_percent_abs = v3_value - tsi_val
+                diff_percent_rel = (diff_percent_abs / tsi_val) * 100 if tsi_val != 0 else 0
+                comparison_text += f"\nvs TSI: {diff_percent_abs:+.1f}% ({diff_percent_rel:+.1f}%)"
+        
+        # Look for Kestrel humidity
+        kestrel_cols = [col for col in self.current_df.columns if 'kestrel' in col.lower() and ('rh' in col.lower() or 'humidity' in col.lower())]
+        if kestrel_cols:
+            kestrel_col = kestrel_cols[0]
+            kestrel_val = pd.to_numeric(self.current_df.iloc[index][kestrel_col], errors='coerce')
+            if pd.notna(kestrel_val):
+                diff_percent_abs = v3_value - kestrel_val
+                diff_percent_rel = (diff_percent_abs / kestrel_val) * 100 if kestrel_val != 0 else 0
+                comparison_text += f"\nvs Kestrel: {diff_percent_abs:+.1f}% ({diff_percent_rel:+.1f}%)"
+                
+        return comparison_text
     
     def create_options_frame(self):
         """Create an options/settings frame"""
