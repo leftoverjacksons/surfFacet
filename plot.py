@@ -51,8 +51,8 @@ def load_and_process_data(csv_file_path):
         
         if correction_start_idx is not None:
             # Apply +1.3°F correction to TA V3 from 13:12 onward
-            df.loc[correction_start_idx:, 'TA V3'] = df.loc[correction_start_idx:, 'TA V3'] + 1
-            print(f"Applied +1°F correction to TA V3 from time {df.loc[correction_start_idx, 'time']} onward ({len(df) - correction_start_idx} data points)")
+            df.loc[correction_start_idx:, 'TA V3'] = df.loc[correction_start_idx:, 'TA V3'] + 1.3
+            print(f"Applied +1.3°F correction to TA V3 from time {df.loc[correction_start_idx, 'time']} onward ({len(df) - correction_start_idx} data points)")
     
     return df
 
